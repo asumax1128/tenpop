@@ -1431,6 +1431,11 @@ function gameOver(reason) {
   el("nameInput").value = rankName();
   el("submitStatus").textContent = "";
   el("submitScoreBtn").disabled = false;
+  // ランキング自動登録：ニックネームが保存済みなら、ボタンを押さなくても自動で登録する
+  if (rankName() && RANKING_URL) {
+    el("submitStatus").textContent = "ランキングに自動登録しています…";
+    setTimeout(function () { if (S.over && !rankSent) submitScore(); }, 700);
+  }
 }
 
 // ===== ランキング（Googleスプレッドシート＋Apps Script方式。FACTORのソロランキングと同じ仕組み）=====
