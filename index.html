@@ -483,6 +483,7 @@
     <div class="sub" id="submitStatus" style="margin:8px 0 0; min-height:18px;"></div>
     <button class="howtoBtn" id="rankBtnFinal" style="margin-top:6px;">🏆 ランキングを見る</button>
     <button class="bigbtn" id="againBtn">もう一度遊ぶ</button>
+    <button class="howtoBtn" id="titleBtn" style="margin-top:10px;">🏠 タイトルに戻る</button>
   </div>
 
 </div>
@@ -1465,8 +1466,19 @@ function rankFetch(cb) {
   sc.src = RANKING_URL + (RANKING_URL.indexOf("?") >= 0 ? "&" : "?") + "callback=" + cbName;
   document.body.appendChild(sc);
 }
+// 同じ名前の登録が複数ある場合は、最も高いスコアのものだけを残す
+function dedupeRows(rows) {
+  var best = {}, order = [];
+  (rows || []).forEach(function (r) {
+    if (!(r.name in best)) { order.push(r.name); best[r.name] = r; }
+    else if (r.score > best[r.name].score) { best[r.name] = r; }
+  });
+  return order.map(function (n) { return best[n]; })
+    .sort(function (a, b) { return b.score - a.score; });
+}
 function renderRankList(data) {
   var box = el("rankList");
+  if (data && data.rows) data = { rows: dedupeRows(data.rows) };
   if (!data || !data.rows || !data.rows.length) {
     box.innerHTML = "<p style='text-align:center; line-height:1.8;'>まだ登録がありません。<br>最初の1位をねらおう！</p>";
     return;
@@ -1523,9 +1535,10 @@ function submitScore() {
       el("submitScoreBtn").disabled = false;
       rankSent = true;
       if (!err && data && data.rows) {
+        var rows = dedupeRows(data.rows);
         var idx = -1;
-        for (var i = 0; i < data.rows.length; i++) {
-          if (data.rows[i].name === name && data.rows[i].score === S.score) { idx = i; break; }
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].name === name && rows[i].score === S.score) { idx = i; break; }
         }
         st.textContent = idx >= 0
           ? "🏆 登録できた！ 現在 " + (idx + 1) + " 位"
@@ -1536,6 +1549,17 @@ function submitScore() {
     });
   }, 1600);
 }
+function backToTitle() {
+  if (timerInt) { clearInterval(timerInt); timerInt = null; }
+  bgmStop();
+  el("dangerOverlay").classList.remove("on");
+  el("finalScreen").classList.add("hidden");
+  el("gameScreen").classList.add("hidden");
+  el("rankOverlay").classList.add("hidden");
+  el("howtoOverlay").classList.add("hidden");
+  el("startScreen").classList.remove("hidden");
+}
+el("titleBtn").addEventListener("click", backToTitle);
 el("submitScoreBtn").addEventListener("click", submitScore);
 el("rankBtnTitle").addEventListener("click", openRanking);
 el("rankBtnFinal").addEventListener("click", openRanking);
