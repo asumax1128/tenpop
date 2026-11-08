@@ -260,6 +260,20 @@
     animation: dangerBlink .5s steps(2, start) infinite;
   }
   @keyframes dangerBlink { 50% { filter: brightness(1.35); } }
+  /* v1.5 ブザービーターの猶予中：残り時間の赤点滅を速くして「最後の1手」を知らせる */
+  #timeWrap.buzzer {
+    color: #fff; background: linear-gradient(180deg, #ff2d3d, #9b0010);
+    animation: dangerBlink .16s steps(2, start) infinite;
+  }
+  /* v1.5 リザルト：最上部の「もう1回」と、おしい表示 */
+  #againTopBtn { margin: 0 0 12px; font-size: 24px; padding: 16px 0; }
+  #oshiiBox { margin: 6px 0 4px; }
+  #oshiiBox:empty { display: none; }
+  .oshiiItem {
+    text-align: center; font-weight: 800; font-size: 16px; color: #e8590c;
+    background: #fff4e6; border-radius: 999px; padding: 6px 12px; margin: 6px auto 0; width: fit-content;
+  }
+  .oshiiItem.record { color: #d6336c; background: #fff0f6; }
   #dangerOverlay {
     position: fixed; inset: 0; background: rgba(225, 25, 40, .38);
     opacity: 0; pointer-events: none; z-index: 60;
@@ -489,10 +503,12 @@
   </div>
 
   <div class="card hidden" id="finalScreen">
+    <button class="bigbtn" id="againTopBtn">▶ もう1回</button>
     <h1 style="font-size:27px;">🏁 ゲーム終了</h1>
     <div class="sub" id="finalReason">もう消せる場所がありません</div>
     <div class="finalScore"><span id="finalScore">0</span><span style="font-size:22px;"> 点</span></div>
     <div class="sub" id="bestLabel"></div>
+    <div id="oshiiBox"></div>
     <p style="text-align:center; font-size:16px;" id="finalStats"></p>
     <div class="rankRow"><input id="nameInput" type="text" maxlength="10" placeholder="ニックネーム（10文字まで）"></div>
     <button class="howtoBtn" id="submitScoreBtn" style="margin-top:10px;">🏆 ランキングに登録する</button>
@@ -949,7 +965,9 @@ function newGame() {
     lastAction: Date.now(), hint: null, dropSet: [], chainReadySet: null,
     endAt: Date.now() + 60000, timeUp: false, lastShownSec: 60,
     session: sessionCounter, // ゲーム単位の識別子（遅延処理・ランキング通信のコールバックはこれで照合する）
-    rankSent: false // このゲームのスコアを送信済みか（送信開始の時点で立てる）
+    rankSent: false, // このゲームのスコアを送信済みか（送信開始の時点で立てる）
+    buzzerUsed: false, buzzerUntil: 0, buzzerPop: false, // v1.5 ブザービーター（1ゲーム1回）
+    prevBest: 0, bestUpdated: false, rankRows: null      // v1.5 おしい表示の材料
   };
   var b = el("chainBanner");
   b.classList.remove("show"); b.textContent = "";
@@ -1000,9 +1018,38 @@ function startTimer() {
     if (S.timeUp && remain > 0) reviveFromTimeUp(); // +3秒マスで残り時間が戻ったら、時間切れを取り消す
     if (remain <= 0 && !S.timeUp) {
       S.timeUp = true;
-      if (!S.busy) gameOver("time");
+      if (canStartBuzzer()) startBuzzer(); // なぞり途中（2枚以上）なら1回だけ700msの猶予
+      else if (!S.busy) gameOver("time");
     }
   }, 200);
+}
+// ===== v1.5 ブザービーター =====
+// 時間切れの瞬間に、なぞり途中（2枚以上なぞっている）なら、1ゲームに1回だけ BUZZER_MS の猶予に入る。
+// ・S.timeUp は立てたまま：新しいなぞりは始められない（traceStart が弾く）が、今のなぞりは traceAdd で続けられる
+// ・猶予中に合計10を完成させたら、その消去の得点（ロングボーナス込み）を ×1.5（切り捨て）
+// ・⏱(+3秒) を含む手なら、通常の消去＋時間延長の復活を優先し、×1.5 は付けない（権利は消費）
+// ・指を離す／BUZZER_MS が過ぎる → 通常どおり終了
+var BUZZER_MS = 700, BUZZER_MULT = 1.5;
+function canStartBuzzer() {
+  return !!(S && !S.over && !S.buzzerUsed && !S.busy && tracing && S.trace && S.trace.length >= 2);
+}
+function isBuzzerActive() { return !!(S && S.buzzerUntil); }
+function startBuzzer() {
+  S.buzzerUsed = true;
+  S.buzzerUntil = Date.now() + BUZZER_MS;
+  el("timeWrap").classList.add("buzzer");
+  el("dangerOverlay").classList.add("on");
+  var sess = S.session;
+  setTimeout(function () {
+    if (!S || S.session !== sess || !isBuzzerActive()) return;
+    endBuzzer();
+    if (!S.busy) gameOver("time"); // 消去の処理中なら、解決の最後（confirmTimeUp）で終了する
+  }, BUZZER_MS);
+}
+function endBuzzer() {
+  if (!S) return;
+  S.buzzerUntil = 0;
+  el("timeWrap").classList.remove("buzzer");
 }
 // 残り秒数に応じた警告表示：5秒以下＝赤点滅（画面全体）、10秒以下＝黄色、それより多ければ通常表示
 function applyTimeWarn(remain) {
@@ -1014,6 +1061,7 @@ function applyTimeWarn(remain) {
 }
 function reviveFromTimeUp() {
   S.timeUp = false;
+  el("timeWrap").classList.remove("buzzer");
   var remain = Math.max(0, Math.ceil((S.endAt - Date.now()) / 1000));
   S.lastShownSec = remain;
   el("timeLabel").textContent = remain;
@@ -1249,10 +1297,15 @@ function traceRelease() {
   tracing = false;
   _traceListen(false);
   if (S && S.traceSum < 10) { S.trace = []; S.traceSum = 0; S.traceWild = false; render(); }
+  if (isBuzzerActive()) { endBuzzer(); if (!S.busy) gameOver("time"); } // 猶予中に指を離した → 通常どおり終了
 }
 function tracePop() {
   var idxs = S.trace.slice();
   var hit10 = S.traceSum === 10 && !S.traceWild; // ワイルド手（合計に関係なく消える）は対象外
+  if (isBuzzerActive()) { // 猶予中の完成：ブザービーターの権利を消費。合計10の完成だけが ×1.5 の対象
+    endBuzzer();
+    S.buzzerPop = hit10;
+  }
   tracing = false;
   _traceListen(false);
   S.trace = [];
@@ -1406,6 +1459,12 @@ function popCellsBody(idxs, level) {
   var longBonus = 0;
   if (level === 1 && idxs.length >= 5) longBonus = idxs.length === 5 ? 20 : idxs.length === 6 ? 40 : 80;
   pts += longBonus;
+  // v1.5 ブザービーター：猶予中に合計10を完成させた手は ×1.5（切り捨て）。⏱を含む手は延長復活を優先して倍率なし
+  var buzzerHit = false;
+  if (level === 1 && S.buzzerPop) {
+    S.buzzerPop = false;
+    if (sp.timeTiles === 0) { pts = Math.floor(pts * BUZZER_MULT); buzzerHit = true; }
+  }
   // フィーバーゲージ：消した個数で溜まる（連鎖は後押し）。満タンで止まり、フィーバー中は溜まらない
   S.gauge = Math.min(100, S.gauge + idxs.length + Math.floor(ex.extra.length / 2) + (level >= 2 ? 3 : 0));
   S.score += pts;
@@ -1445,6 +1504,7 @@ function popCellsBody(idxs, level) {
     }
   }
   var note = "";
+  if (buzzerHit) note += " ブザービーター！×1.5";
   if (longBonus > 0) note += " LONG×" + idxs.length + "! +" + longBonus;
   if (sp.mult === 2) note += " ×2倍!";
   if (sp.timeTiles > 0) note += " +" + (3 * sp.timeTiles) + "秒!";
@@ -1640,6 +1700,10 @@ function gameOver(reason) {
   el("finalScreen").classList.remove("hidden");
   el("finalScore").textContent = S.score;
   var best = 0;
+  S.prevBest = readBest();
+  S.bestUpdated = S.score > S.prevBest;
+  endBuzzer();
+  el("timeWrap").classList.remove("buzzer");
   try {
     best = readBest();
     if (S.score > best || String(best) !== localStorage.getItem("tenpop_best")) {
@@ -1650,6 +1714,8 @@ function gameOver(reason) {
   } catch (e) { best = S.score; }
   el("bestLabel").textContent = "ベストスコア：" + best + " 点（この端末のみ）";
   el("finalStats").textContent = "消したタイル " + S.popped + " 個 ／ 最大 " + S.maxChain + " 連鎖 ／ ビッグポップ " + S.bigPops + " 回";
+  S.rankRows = lastRankRows; // 以前に取得できていたランキングがあれば使う（送信後の再取得で更新される）
+  renderOshii();
   el("nameInput").value = rankName();
   el("submitStatus").textContent = "";
   el("submitScoreBtn").disabled = false;
@@ -1662,6 +1728,47 @@ function gameOver(reason) {
       if (S && S.session === gid && S.over && !S.rankSent) submitScore({ auto: true });
     }, 700);
   }
+}
+// ===== v1.5 おしい表示 =====
+// 候補：自己ベストまで／1つ上の順位まで／フィーバーまで。差が自己ベストの20%を超えるものは出さない。
+// 差の小さい順（自己ベストに対する割合で比べる。フィーバーはゲージの残り割合）に最大2つ。
+// 自己ベストを更新した回は「自己ベストまで」を出さず、新記録の表示を先頭に出す
+var OSHII_MAX = 2, OSHII_RATIO = 0.2, OSHII_FEVER_MIN = 80;
+function computeOshii(o) {
+  var out = [];
+  var base = Math.max(o.prevBest || 0, o.score || 0); // 20%の基準になる自己ベスト（更新した回は今回の点）
+  var limit = base * OSHII_RATIO;
+  var updated = o.score > (o.prevBest || 0);
+  if (!updated && o.prevBest > 0) {
+    var d = o.prevBest - o.score;
+    if (d > 0 && d <= limit) out.push({ kind: "best", gap: d, ratio: d / base, text: "自己ベストまで あと" + d + "点" });
+  }
+  if (o.rows && o.rows.length) {
+    var others = dedupeRows(o.rows).filter(function (r) { return !o.myName || r.name !== o.myName; });
+    var above = null;
+    others.forEach(function (r) { if (r.score > o.score && (!above || r.score < above.score)) above = r; });
+    if (above) {
+      var rank = 1;
+      others.forEach(function (r) { if (r.score > above.score) rank++; });
+      var d2 = above.score - o.score;
+      if (base > 0 && d2 <= limit) out.push({ kind: "rank", gap: d2, ratio: d2 / base, text: rank + "位まで あと" + d2 + "点" });
+    }
+  }
+  if (o.gauge >= OSHII_FEVER_MIN && o.gauge < 100) {
+    var rest = 100 - o.gauge; // ゲージは消した枚数ぶん溜まるので、残りをそのまま枚数の概算にする
+    out.push({ kind: "fever", gap: rest, ratio: rest / 100, text: "フィーバーまで あと約" + Math.ceil(rest) + "枚" });
+  }
+  out.sort(function (a, b) { return a.ratio - b.ratio; });
+  return out.slice(0, OSHII_MAX);
+}
+function renderOshii() {
+  var box = el("oshiiBox");
+  if (!box || !S) return;
+  var items = computeOshii({ score: S.score, prevBest: S.prevBest, gauge: S.gauge, rows: S.rankRows, myName: rankName() });
+  var html = "";
+  if (S.bestUpdated && S.prevBest > 0) html += "<div class='oshiiItem record'>🎉 自己ベスト更新！</div>";
+  items.forEach(function (it) { html += "<div class='oshiiItem' data-kind='" + it.kind + "'>おしい！ " + escapeHtml(it.text) + "</div>"; });
+  box.innerHTML = html;
 }
 // 端末ベスト：有限の非負数でなければ壊れているとみなして 0 として扱う（以後の更新で正しい値に書き直される）
 function readBest() {
@@ -1681,6 +1788,7 @@ var RANKING_URL = "https://script.google.com/macros/s/AKfycbywtZgYesooyHB0f2X92M
 var NAME_MAX = 10;        // ニックネームの最大文字数（入力欄 maxlength・サーバー側と揃える）
 var SCORE_MAX = 100000;   // スコアの妥当範囲の上限（サーバー側と揃える）
 var rankCbSeq = 0;        // JSONP コールバック名の連番
+var lastRankRows = null;  // v1.5 最後に取得できたランキング（おしい表示で使う）
 var rankViewSeq = 0;      // ランキング画面の読み込み世代（古い応答で新しい表示を上書きしない）
 
 // 名前の正規化：前後の空白を除き、文字数（サロゲートペアは1文字）で NAME_MAX に切り詰める
@@ -1737,6 +1845,7 @@ function rankFetch(cb) {
   }
   window[cbName] = function (data) {
     var v = validateRankData(data);
+    if (v) lastRankRows = v.rows;
     if (v) finish(v, null); else finish(null, "invalid");
   };
   sc.onerror = function () { finish(null, "error"); };
@@ -1802,6 +1911,7 @@ function openRanking() {
     }
     renderRankList(data);
     el("rankNote").textContent = "上位30件を表示しています";
+    if (S && S.over && !el("finalScreen").classList.contains("hidden")) { S.rankRows = data.rows; renderOshii(); }
   });
 }
 // スコア送信。opts.auto のときは保存済みの確定した名前で送る（入力途中の文字列は使わない）
@@ -1838,6 +1948,7 @@ function submitScore(opts) {
     rankFetch(function (data, err) {
       if (!S || S.session !== gid) return; // 前のゲームの応答で新しいゲームの表示を書き換えない
       // 送信済みなのでボタンは押せないまま（押しても「登録済み」と出るだけ）
+      if (!err && data) { S.rankRows = data.rows; renderOshii(); }
       st.textContent = (!err && data) ? rankMessage(data.rows, name, score)
         : "送信しました（反映に少し時間がかかることがあります）";
     });
@@ -1889,6 +2000,7 @@ el("tutNext").addEventListener("click", function () {
 el("startBtn").addEventListener("click", newGame);
 el("feverBtn").addEventListener("click", startFever);
 el("againBtn").addEventListener("click", newGame);
+el("againTopBtn").addEventListener("click", newGame);
 </script>
 </body>
 </html>
