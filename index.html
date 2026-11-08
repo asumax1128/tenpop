@@ -776,6 +776,29 @@ function existsTraceMove(cells, spec) { return !!findTracePath(cells, spec); }
 // 旧API（互換用）：どちらも共通の合法手判定に委ねる
 function hasMove(cells, spec) { return existsTraceMove(cells, spec); }
 function findHintGroup(cells, spec) { return findTracePath(cells, spec); }
+// ===== v1.6 シャッフル（手動・自動で共通）=====
+// 数字の並べ替えは、氷のマスとそれ以外のマスを分けて行う：氷の数字（99）は氷のマスの間だけ（＝その場から動かない）、
+// 通常・その他の特殊マスの数字は、氷以外のマスの間で並べ替える。特殊マスの種類（spec）は動かさない。
+// 並べ替えを SHUFFLE_TRIES 回試しても消せる手ができない（数字の組み合わせ自体に手がない）ときは、
+// 氷以外の数字を randomTile() で振り直して手を作る（最大 SHUFFLE_TRIES 回）。
+var SHUFFLE_TRIES = 60;
+function shuffleValuesKeepingSpecials(cells, spec, tries) {
+  tries = tries || SHUFFLE_TRIES;
+  var movable = [];
+  for (var i = 0; i < BN; i++) if (!isIceCell(cells, spec, i)) movable.push(i);
+  var out = cells.slice();
+  for (var t = 0; t < tries; t++) {
+    var vals = movable.map(function (idx) { return cells[idx]; });
+    for (var k = vals.length - 1; k > 0; k--) { var j = ri(k + 1); var tmp = vals[k]; vals[k] = vals[j]; vals[j] = tmp; }
+    movable.forEach(function (idx, m) { out[idx] = vals[m]; });
+    if (existsTraceMove(out, spec)) return out;
+  }
+  for (var t2 = 0; t2 < tries; t2++) {
+    movable.forEach(function (idx) { out[idx] = randomTile(); });
+    if (existsTraceMove(out, spec)) return out;
+  }
+  return out;
+}
 function genBoard() {
   for (var t = 0; t < 60; t++) {
     var cells = [];
@@ -967,7 +990,8 @@ function newGame() {
     session: sessionCounter, // ゲーム単位の識別子（遅延処理・ランキング通信のコールバックはこれで照合する）
     rankSent: false, // このゲームのスコアを送信済みか（送信開始の時点で立てる）
     buzzerUsed: false, buzzerUntil: 0, buzzerPop: false, // v1.5 ブザービーター（1ゲーム1回）
-    prevBest: 0, bestUpdated: false, rankRows: null      // v1.5 おしい表示の材料
+    prevBest: 0, bestUpdated: false, rankRows: null,     // v1.5 おしい表示の材料
+    autoShuffleUsed: false                               // v1.6 詰みの受け皿の自動シャッフル（1ゲーム1回）
   };
   var b = el("chainBanner");
   b.classList.remove("show"); b.textContent = "";
@@ -1621,7 +1645,28 @@ function checkEnd() {
     el("msgLabel").textContent = "消せる場所がない…シャッフル券が使えます";
     return;
   }
+  if (!S.autoShuffleUsed) { autoShuffle(); return; } // v1.6 詰みの受け皿：1ゲーム1回だけ自動でシャッフルして続ける
   gameOver("dead");
+}
+// ===== v1.6 自動シャッフル（消せる手の保証が確率的に外れたときの受け皿）=====
+// 残り時間から AUTO_SHUFFLE_PENALTY_MS を引く。ただし残りが AUTO_SHUFFLE_MIN_REMAIN_MS 未満にはしない（もともと少なければ増やしもしない）
+var AUTO_SHUFFLE_PENALTY_MS = 3000, AUTO_SHUFFLE_MIN_REMAIN_MS = 500;
+function autoShuffle() {
+  S.autoShuffleUsed = true;
+  S.sel = [];
+  S.hint = null;
+  S.cells = shuffleValuesKeepingSpecials(S.cells, S.spec);
+  var now = Date.now();
+  S.endAt = Math.min(S.endAt, Math.max(S.endAt - AUTO_SHUFFLE_PENALTY_MS, now + AUTO_SHUFFLE_MIN_REMAIN_MS));
+  S.lastAction = now;
+  sfxShuffle();
+  el("msgLabel").textContent = "🔀 シャッフル！（−3秒）";
+  render();
+  spawnPopup([14, 15, 20, 21], "シャッフル！", false);
+  var big = findBigRun(S.cells);
+  if (big.length > 0) { S.busy = true; bigPop(big, 2); return; }
+  // 振り直しの上限でも手が作れなかった場合（氷に囲まれた盤面など）は、受け皿を使い切ったので終了
+  if (!existsTraceMove(S.cells, S.spec)) gameOver("dead");
 }
 
 // ヒント監視：6秒間なにも消せていなければ、候補グループをそっと光らせる
@@ -1641,13 +1686,7 @@ el("shuffleBtn").addEventListener("click", function () {
   S.sel = [];
   S.hint = null;
   sfxShuffle();
-  for (var t = 0; t < 60; t++) {
-    var vals = S.cells.slice();
-    for (var i = vals.length - 1; i > 0; i--) { var j = ri(i + 1); var tmp = vals[i]; vals[i] = vals[j]; vals[j] = tmp; }
-    S.cells = vals;
-    if (existsTraceMove(S.cells, S.spec)) break;
-    if (t === 59) S.cells = genBoard();
-  }
+  S.cells = shuffleValuesKeepingSpecials(S.cells, S.spec); // v1.6 氷の数字は動かさない（自動シャッフルと共通）
   S.lastAction = Date.now();
   el("msgLabel").textContent = "シャッフルしました";
   render();
