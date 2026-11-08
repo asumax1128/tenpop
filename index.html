@@ -210,6 +210,14 @@
     box-shadow: 0 10px 22px rgba(0,0,0,.4), 0 0 0 3px #fff;
   }
   #popLayer { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+  /* v1.8 なぞり中の吹き出し：指の約60px上に今の状態を出す（ポインタ操作の邪魔をしない） */
+  #traceBubble {
+    position: fixed; left: 0; top: 0; z-index: 70; pointer-events: none;
+    padding: 4px 12px; border-radius: 999px; white-space: nowrap;
+    background: rgba(61, 43, 82, .88); color: #fff; font-weight: 800; font-size: 16px;
+    box-shadow: 0 4px 10px rgba(0,0,0,.25);
+  }
+  #traceBubble.hidden { display: none; }
   .scorePop {
     position: absolute; transform: translate(-50%, -50%);
     font-weight: 800; font-size: 24px; color: #ffb52e; white-space: nowrap;
@@ -376,6 +384,7 @@
 </head>
 <body>
 <div id="dangerOverlay"></div>
+<div id="traceBubble" class="hidden" aria-hidden="true"></div>
 <div class="wrap">
 
   <div class="card" id="startScreen">
@@ -1157,10 +1166,12 @@ function render() {
     d.addEventListener("pointerdown", function (e) {
       if (e.preventDefault) e.preventDefault();
       traceStart(i);
+      if (tracing) moveTraceBubble(e.clientX, e.clientY);
     });
     board.appendChild(d);
   });
   updateFeverUI();
+  updateTraceBubbleText();
 }
 
 // 落下をなめらかに：落下前のタイル位置を記録し、落下後に「元の位置→新しい位置」へ滑らせる（FLIP）
@@ -1227,6 +1238,7 @@ function _traceMoveHandler(e) { tracePointerMove(e.clientX, e.clientY); }
 function _traceEndHandler() { traceRelease(); }
 function _traceListen(on) {
   setBgmDuck(on); // なぞっている間だけ BGM を約3割下げる（離す・消える・終了で戻る）
+  if (!on) hideTraceBubble(); // v1.8 吹き出しも、離す・消える・終了で必ず消す
   if (on) {
     document.addEventListener("pointermove", _traceMoveHandler);
     document.addEventListener("pointerup", _traceEndHandler);
@@ -1342,14 +1354,103 @@ function tracePop() {
   // 合計10に到達した瞬間：消えるタイルを白く光らせる（popCells の render 後のタイルに付ける。色の変数は render で消えている）
   if (hit10) idxs.forEach(function (i) { var t = el("tile" + i); if (t) t.classList.add("sum10"); });
 }
+// ===== v1.8 なぞりの吸着 =====
+// なぞっている最中だけ、指がタイルの中心から「タイル幅の MAGNET_RATIO 倍」以内に入ったら、そのタイルに触れたものとして扱う。
+// ・吸着の対象は、今のなぞりのルールで次に進めるタイル（canTraceTo）だけ。最後になぞったタイルの上下左右と、1つ前（取り消し）
+// ・最後のタイルの中心より近い候補だけを拾う（境目でのばたつき・意図しない取り消しを防ぐ）
+// ・なぞっていないときのタップ判定（pointerdown）は従来どおりタイルの上だけ
+var MAGNET_RATIO = 0.7;
+function tileCenter(i) {
+  var t = el("tile" + i);
+  if (!t || typeof t.getBoundingClientRect !== "function") return null;
+  var r = t.getBoundingClientRect();
+  if (!r || !r.width) return null;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width };
+}
+// 今のなぞりのルールで j へ進める（または1つ戻れる）か。traceAdd と同じ条件を、状態を変えずに確かめる
+function canTraceTo(j) {
+  if (!tracing || !S || S.busy) return false;
+  if (S.spec && S.spec[j] === "ice") return false;
+  var path = S.trace, last = path[path.length - 1];
+  if (j === last) return false;
+  if (path.length >= 2 && j === path[path.length - 2]) return true; // 取り消し
+  if (path.indexOf(j) >= 0) return false;
+  if (neighbors(last).indexOf(j) < 0) return false;
+  if (S.spec && S.spec[j] === "wild") return !S.traceWild;
+  if (S.traceWild) return true;
+  if (S.traceSum + S.cells[j] > 10) return false;
+  if (path.length >= MAX_TRACE_LEN) return false;
+  return true;
+}
+function magnetPick(x, y) {
+  if (!tracing || !S || !S.trace.length) return -1;
+  var path = S.trace, last = path[path.length - 1];
+  var lc = tileCenter(last);
+  var dLast = lc ? Math.hypot(x - lc.x, y - lc.y) : Infinity;
+  var cands = neighbors(last).slice();
+  if (path.length >= 2) cands.push(path[path.length - 2]);
+  var best = -1, bestD = Infinity;
+  cands.forEach(function (j) {
+    if (!canTraceTo(j)) return;
+    var c = tileCenter(j);
+    if (!c) return;
+    var d = Math.hypot(x - c.x, y - c.y);
+    if (d <= MAGNET_RATIO * c.w && d < dLast && d < bestD) { best = j; bestD = d; }
+  });
+  return best;
+}
 function tracePointerMove(x, y) {
   if (!tracing) return;
+  moveTraceBubble(x, y);
+  var m = magnetPick(x, y);
+  if (m >= 0) { traceAdd(m); moveTraceBubble(x, y); return; }
   if (typeof document.elementFromPoint !== "function") return;
   var node = document.elementFromPoint(x, y);
   while (node && !(node.classList && node.classList.contains("tile"))) node = node.parentNode;
   if (!node || !node.id) return;
   var idx = parseInt(String(node.id).replace("tile", ""), 10);
   if (!isNaN(idx)) traceAdd(idx);
+}
+
+// ===== v1.8 なぞり中の吹き出し =====
+var BUBBLE_OFFSET_Y = 60, BUBBLE_MARGIN = 8;
+var bubbleX = null, bubbleY = null;
+function traceBubbleText() {
+  if (!S || !S.trace || !S.trace.length) return "";
+  if (S.traceWild && S.trace.length === 1) return "🌈 ワイルド";
+  return S.traceSum >= 10 ? "合計10！" : "あと" + (10 - S.traceSum);
+}
+function updateTraceBubbleText() {
+  var b = el("traceBubble");
+  if (!b) return;
+  if (!tracing || !S || !S.trace || !S.trace.length) { hideTraceBubble(); return; }
+  b.textContent = traceBubbleText();
+  if (bubbleX === null) return; // 指の位置が分かるまでは出さない（左上に一瞬出るのを防ぐ）
+  b.classList.remove("hidden");
+  placeTraceBubble();
+}
+function moveTraceBubble(x, y) {
+  if (!tracing) return;
+  bubbleX = x; bubbleY = y;
+  updateTraceBubbleText();
+}
+// 指の約60px上・左右中央。画面からはみ出す場合は画面内に収める（上が足りなければ指の下に出す）
+function placeTraceBubble() {
+  var b = el("traceBubble");
+  if (!b || bubbleX === null) return;
+  var w = b.offsetWidth || 0, h = b.offsetHeight || 0;
+  var vw = (typeof window !== "undefined" && window.innerWidth) || 0;
+  var left = bubbleX - w / 2;
+  var top = bubbleY - BUBBLE_OFFSET_Y - h / 2;
+  if (vw) left = Math.max(BUBBLE_MARGIN, Math.min(left, vw - w - BUBBLE_MARGIN));
+  if (top < BUBBLE_MARGIN) top = bubbleY + BUBBLE_OFFSET_Y / 2;
+  b.style.left = Math.round(left) + "px";
+  b.style.top = Math.round(top) + "px";
+}
+function hideTraceBubble() {
+  var b = el("traceBubble");
+  if (b) b.classList.add("hidden");
+  bubbleX = null; bubbleY = null;
 }
 
 // フィーバー：ゲージが満タンになると自動で発動する（集中すると押し忘れるため、福山の指定で自動化）。
