@@ -519,14 +519,22 @@ function findPairCells(cells, cols) {
 }
 function settleBoard(cells) { return settleBoardEx(cells, null, null).cells; }
 // 特殊マスの抽選（補充タイル用）。出現フェイズは opts で渡す：
-// ワイルドは残り30秒を切ってから（最大1つ）、氷は残り20秒以降のみ（最大2つ）。数え方は配置済み分のみの近似
-function rollSpecial(specArr, opts) {
-  var wilds = 0, ices = 0;
-  (specArr || []).forEach(function (sp) { if (sp === "wild") wilds++; else if (sp === "ice") ices++; });
+// ワイルドは残り30秒を切ってから（最大1つ）、氷は残り20秒以降のみ（最大2つ）。
+// 上限は盤面全体で厳密に数える：第1引数は {wild, ice} の個数（settleBoardEx が盤面全体＋今回の補充分を数えて渡す）。
+// 互換のため spec 配列を渡された場合はその配列を数える
+var MAX_WILD = 1, MAX_ICE = 2;
+function countSpecials(specArr) {
+  var cnt = { wild: 0, ice: 0 };
+  (specArr || []).forEach(function (sp) { if (sp === "wild") cnt.wild++; else if (sp === "ice") cnt.ice++; });
+  return cnt;
+}
+function rollSpecial(counts, opts) {
+  if (Array.isArray(counts) || !counts) counts = countSpecials(counts);
+  var wilds = counts.wild || 0, ices = counts.ice || 0;
   var r = Math.random();
   var b = (opts && opts.boost) ? 1.8 : 1; // ラストスパート中は特殊マスが出やすい
-  if (r < 0.02 * b) return (opts && opts.wild && wilds < 1) ? "wild" : null;
-  if (r < 0.035 * b) return (opts && opts.ice && ices < 2) ? "ice" : null;
+  if (r < 0.02 * b) return (opts && opts.wild && wilds < MAX_WILD) ? "wild" : null;
+  if (r < 0.035 * b) return (opts && opts.ice && ices < MAX_ICE) ? "ice" : null;
   if (r < 0.055 * b) return "bomb";
   if (r < 0.075 * b) return "time";
   if (r < 0.105 * b) return "x2";
@@ -540,6 +548,15 @@ function settleBoardEx(cells, spec, opts) {
   var outSpec = new Array(BN).fill(null);
   var fresh = [];
   var src = new Array(BN).fill(-1); // src[新しい位置] = 元の位置（新規タイルは -1）。落下アニメーション用
+  // 特殊マスの上限判定用：抽選の前に盤面全体の既存分（まだ処理していない列も含む）を数え、補充で出た分を足していく。
+  // 消去済みのマス（値0）は popCells/bigPop で spec を null にしてから来るので数えない
+  var specCount = { wild: 0, ice: 0 };
+  if (spec) {
+    for (var q = 0; q < BN; q++) {
+      if (spec[q] === "ice") specCount.ice++;
+      else if (spec[q] === "wild" && cells[q]) specCount.wild++;
+    }
+  }
   for (var c = 0; c < BW; c++) {
     var r = BH - 1;
     while (r >= 0) {
@@ -565,7 +582,9 @@ function settleBoardEx(cells, spec, opts) {
           src[idx] = stack[k].id;
           if (stack[k].id !== idx) fresh.push(idx);
         } else {
-          var sp = rollSpecial(outSpec, opts);
+          var sp = rollSpecial(specCount, opts);
+          if (sp === "wild") specCount.wild++;
+          else if (sp === "ice") specCount.ice++;
           outSpec[idx] = sp;
           out[idx] = sp === "ice" ? 99 : randomTile();
           src[idx] = -1;
@@ -635,74 +654,75 @@ function findBigRun(cells) {
   }
   return out;
 }
-function hasMove(cells) {
-  if (findPairCells(cells).length > 0) return true;
-  for (var s = 0; s < BN; s++) {
-    if (!cells[s]) continue;
-    var n1 = neighbors(s);
-    for (var a = 0; a < n1.length; a++) {
-      var i = n1[a]; if (!cells[i]) continue;
-      var n2 = neighbors(i);
-      for (var b = 0; b < n2.length; b++) {
-        var j = n2[b];
-        if (j === s || !cells[j]) continue;
-        if (cells[s] + cells[i] + cells[j] === 10) return true;
-      }
-    }
-  }
-  return false;
+// ===== 合法手の判定（なぞり入力 traceAdd と同じルール）=====
+// ・氷マスは通れない（始点にも途中にもできない）
+// ・ワイルド手：ワイルド＋隣接する（氷・ワイルド以外の）どれか1枚＝2枚で消去。
+//   入力では、数字をなぞった後（何枚目でも）ワイルドに触れるとパス全体が合計に関係なく消える。
+//   その場合も「最後の数字＋ワイルド」の2枚手が必ず存在するので、手の有無の判定としては2枚手だけ見れば等価
+// ・数字パス：ワイルド・氷を含まない、隣接でつながった重複なしのパスで、合計がちょうど10（2マス以上）
+// 盤面の数字は正の整数（1〜9）なので、合計10のパスは最大10マス
+var MAX_TRACE_LEN = 10;
+function isIceCell(cells, spec, i) { return spec ? spec[i] === "ice" : cells[i] === 99; }
+function isWildCell(spec, i) { return !!(spec && spec[i] === "wild"); }
+// 数字パスに使えるマスか（ワイルド・氷・空きマスは不可）
+function isNumberCell(cells, spec, i) {
+  var v = cells[i];
+  return !!v && v >= 1 && v <= 9 && !isIceCell(cells, spec, i) && !isWildCell(spec, i);
 }
-// トレース形式：なぞって作れる「合計10のパス」を1つ返す（ヒント用に長いものを優先）。なければ null
-function findTracePath(cells) {
-  var best = null;
-  for (var s = 0; s < BN; s++) {
-    if (!cells[s]) continue;
-    var path = [s];
-    (function rec(cur, sum) {
-      if (sum === 10 && path.length >= 2) {
-        if (!best || path.length > best.length) best = path.slice();
-        return;
-      }
-      if (sum > 10 || path.length >= 8) return;
-      var ns = neighbors(cur);
-      for (var k = 0; k < ns.length; k++) {
-        var n = ns[k];
-        if (path.indexOf(n) >= 0 || !cells[n]) continue;
-        path.push(n);
-        rec(n, sum + cells[n]);
-        path.pop();
-      }
-    })(s, cells[s]);
-    if (best && best.length >= 6) break;
-  }
-  return best;
-}
-function existsTraceMove(cells) { return !!findTracePath(cells); }
-// ヒント用：消せるグループを1つ返す（ペア優先、なければ3個パス）。なければ null
-function findHintGroup(cells) {
-  for (var i = 0; i < BN; i++) {
-    if (!cells[i]) continue;
-    var ns = neighbors(i);
+// ワイルド手を1つ返す（[ワイルド, 相手]）。なければ null
+function findWildMove(cells, spec) {
+  if (!spec) return null;
+  for (var w = 0; w < BN; w++) {
+    if (!isWildCell(spec, w) || !cells[w]) continue;
+    var ns = neighbors(w);
     for (var k = 0; k < ns.length; k++) {
-      var j = ns[k];
-      if (j > i && cells[j] && cells[i] + cells[j] === 10) return [i, j];
-    }
-  }
-  for (var s = 0; s < BN; s++) {
-    if (!cells[s]) continue;
-    var n1 = neighbors(s);
-    for (var a = 0; a < n1.length; a++) {
-      var x = n1[a]; if (!cells[x]) continue;
-      var n2 = neighbors(x);
-      for (var b = 0; b < n2.length; b++) {
-        var y = n2[b];
-        if (y === s || !cells[y]) continue;
-        if (cells[s] + cells[x] + cells[y] === 10) return [s, x, y];
-      }
+      if (isNumberCell(cells, spec, ns[k])) return [w, ns[k]];
     }
   }
   return null;
 }
+// 合法手を1つ返す（ヒント・詰み判定・初期盤面の共通関数）。最長の保証はしない。なければ null
+function findTracePath(cells, spec) {
+  // 1) 隣接ペア（安い判定を先に）
+  for (var i = 0; i < BN; i++) {
+    if (!isNumberCell(cells, spec, i)) continue;
+    var ns0 = neighbors(i);
+    for (var k0 = 0; k0 < ns0.length; k0++) {
+      var j = ns0[k0];
+      if (isNumberCell(cells, spec, j) && cells[i] + cells[j] === 10) return [i, j];
+    }
+  }
+  // 2) ワイルド手
+  var wm = findWildMove(cells, spec);
+  if (wm) return wm;
+  // 3) 3マス以上の数字パス（深さ上限 MAX_TRACE_LEN）
+  var found = null;
+  var used = new Array(BN).fill(false);
+  var path = [];
+  function rec(cur, sum) {
+    if (sum === 10) { if (path.length >= 2) found = path.slice(); return; }
+    if (path.length >= MAX_TRACE_LEN) return;
+    var ns = neighbors(cur);
+    for (var k = 0; k < ns.length && !found; k++) {
+      var n = ns[k];
+      if (used[n] || !isNumberCell(cells, spec, n) || sum + cells[n] > 10) continue;
+      used[n] = true; path.push(n);
+      rec(n, sum + cells[n]);
+      path.pop(); used[n] = false;
+    }
+  }
+  for (var s = 0; s < BN && !found; s++) {
+    if (!isNumberCell(cells, spec, s)) continue;
+    used[s] = true; path = [s];
+    rec(s, cells[s]);
+    used[s] = false;
+  }
+  return found;
+}
+function existsTraceMove(cells, spec) { return !!findTracePath(cells, spec); }
+// 旧API（互換用）：どちらも共通の合法手判定に委ねる
+function hasMove(cells, spec) { return existsTraceMove(cells, spec); }
+function findHintGroup(cells, spec) { return findTracePath(cells, spec); }
 function genBoard() {
   for (var t = 0; t < 60; t++) {
     var cells = [];
@@ -845,6 +865,7 @@ var sessionCounter = 0; // 再スタート時に前のゲームの遅延処理�
 function el(id) { return document.getElementById(id); }
 
 function newGame() {
+  resetTraceInput(); // 前のゲームのなぞり状態・document のイベント購読を必ず解除
   sessionCounter++;
   el("howtoOverlay").classList.add("hidden");
   el("rankOverlay").classList.add("hidden");
@@ -854,7 +875,8 @@ function newGame() {
     busy: false, shuffle: 0, over: false, bigPops: 0,
     lastAction: Date.now(), hint: null, dropSet: [], chainReadySet: null,
     endAt: Date.now() + 60000, timeUp: false, lastShownSec: 60,
-    session: sessionCounter
+    session: sessionCounter, // ゲーム単位の識別子（遅延処理・ランキング通信のコールバックはこれで照合する）
+    rankSent: false // このゲームのスコアを送信済みか（送信開始の時点で立てる）
   };
   var b = el("chainBanner");
   b.classList.remove("show"); b.textContent = "";
@@ -866,6 +888,8 @@ function newGame() {
   el("gameScreen").classList.remove("hidden");
   el("popLayer").innerHTML = "";
   el("msgLabel").textContent = "";
+  el("submitStatus").textContent = ""; // 前のゲームの送信表示を持ち越さない
+  el("submitScoreBtn").disabled = false;
   updateSoundBtn();
   updateBgmBtn();
   bgmStart();
@@ -896,26 +920,41 @@ function startTimer() {
     if (remain !== S.lastShownSec) {
       S.lastShownSec = remain;
       el("timeLabel").textContent = remain;
-      if (remain <= 5 && remain > 0) { // 残り5秒で赤点滅（画面全体）
-        el("timeWrap").classList.remove("warn");
-        el("timeWrap").classList.add("danger");
-        el("dangerOverlay").classList.add("on");
-        sfxTick();
-      } else if (remain <= 10 && remain > 0) {
-        el("timeWrap").classList.add("warn");
-        sfxTick();
-      }
+      applyTimeWarn(remain); // +3秒で延命したときも、ここで残り秒数どおりの表示に戻る
+      if (remain <= 10 && remain > 0) sfxTick();
     }
-    if (S.timeUp && remain > 0) { // +3秒マスで残り時間が戻ったら、時間切れを取り消す
-      S.timeUp = false;
-      el("dangerOverlay").classList.remove("on");
-      el("timeWrap").classList.remove("danger");
-    }
+    if (S.timeUp && remain > 0) reviveFromTimeUp(); // +3秒マスで残り時間が戻ったら、時間切れを取り消す
     if (remain <= 0 && !S.timeUp) {
       S.timeUp = true;
       if (!S.busy) gameOver("time");
     }
   }, 200);
+}
+// 残り秒数に応じた警告表示：5秒以下＝赤点滅（画面全体）、10秒以下＝黄色、それより多ければ通常表示
+function applyTimeWarn(remain) {
+  var danger = remain <= 5 && remain > 0;
+  var warn = !danger && remain <= 10 && remain > 0;
+  el("timeWrap").classList.toggle("danger", danger);
+  el("timeWrap").classList.toggle("warn", warn);
+  el("dangerOverlay").classList.toggle("on", danger);
+}
+function reviveFromTimeUp() {
+  S.timeUp = false;
+  var remain = Math.max(0, Math.ceil((S.endAt - Date.now()) / 1000));
+  S.lastShownSec = remain;
+  el("timeLabel").textContent = remain;
+  applyTimeWarn(remain);
+}
+// 時間切れを確定してよいか。終了判定の直前に endAt を再確認する（タイマー監視の実行順に結果が左右されないように）。
+// 連鎖中の +3秒で endAt が延びていれば、ここで時間切れを取り消して false を返す
+function confirmTimeUp() {
+  if (!S || S.over) return false;
+  if (S.endAt > Date.now()) {
+    if (S.timeUp) reviveFromTimeUp();
+    return false;
+  }
+  S.timeUp = true;
+  return true;
 }
 function showBanner(text, level, isBig) {
   try {
@@ -1076,7 +1115,7 @@ function traceAdd(j) {
   }
   if (path.indexOf(j) >= 0) return;
   if (neighbors(last).indexOf(j) < 0) return;
-  if (S.spec && S.spec[j] === "wild") { // ワイルドに触れたら、相手が何でも合計10で消える
+  if (S.spec && S.spec[j] === "wild") { // ワイルドに触れたら、相手が何でも合計10で消える（パスの何枚目でも、パス全体が消える）
     if (S.traceWild) return;
     path.push(j);
     S.lastAction = Date.now();
@@ -1090,12 +1129,20 @@ function traceAdd(j) {
     return;
   }
   if (S.traceSum + S.cells[j] > 10) return; // 10を超えるタイルには進めない
+  if (path.length >= MAX_TRACE_LEN) return; // 合法手判定と同じ深さ上限（数字は1以上なので実質的には届かない）
   path.push(j);
   S.traceSum += S.cells[j];
   S.lastAction = Date.now();
   if (S.traceSum === 10) { tracePop(); return; }
   sfxSelect();
   render();
+}
+// なぞり途中の入力状態を必ず解除する（gameOver／newGame／タイトル戻り）。
+// 時間切れの瞬間に指を置いたままでも、tracing フラグと document 側のイベント購読が残らないようにする
+function resetTraceInput() {
+  tracing = false;
+  _traceListen(false);
+  if (S) { S.trace = []; S.traceSum = 0; S.traceWild = false; }
 }
 function traceRelease() {
   if (!tracing) return;
@@ -1207,7 +1254,45 @@ function specialNotes(idxs, level) {
   return { mult: mult, timeTiles: timeTiles };
 }
 
+// ===== 解決処理の例外耐性 =====
+// 消去→落下→連鎖の各段は setTimeout でつながっていて、busy は連鎖の最後に resolveStep が戻す。
+// 途中の段で例外が出ると次の段が予約されず busy が戻らないため、各段を guardStep で包み、
+// 次の段を予約できずに抜けた場合は finally で必ず recoverBusy に入る。
+function guardStep(sess, fn) {
+  var handedOff = false; // 次の段を予約できた or 正常に解決を終えた
+  try {
+    handedOff = fn() === true;
+  } finally {
+    if (!handedOff) recoverBusy(sess);
+  }
+}
+function recoverBusy(sess) {
+  if (!S || S.session !== sess) return;
+  try {
+    S.chainReadySet = null;
+    S.hint = null;
+    // 消去途中で止まっていたら、空きマスを補充してから操作に戻す
+    var hasHole = S.cells.some(function (v) { return !v; });
+    if (hasHole) {
+      var res = settleBoardEx(S.cells, S.spec, specialOpts());
+      S.cells = res.cells; S.spec = res.spec; S.fresh = res.fresh;
+    }
+  } catch (e) { /* 補充に失敗しても busy だけは必ず戻す */ }
+  S.busy = false;
+  S.lastAction = Date.now();
+  try {
+    render();
+    if (S.over) return;
+    if (confirmTimeUp()) { gameOver("time"); return; }
+    checkEnd();
+  } catch (e2) { /* 表示や終了判定の失敗で固まらないように握りつぶす（busy は解除済み） */ }
+}
+
 function popCells(idxs, level) {
+  var sess0 = S.session;
+  guardStep(sess0, function () { return popCellsBody(idxs, level); });
+}
+function popCellsBody(idxs, level) {
   S.busy = true;
   S.lastAction = Date.now();
   S.hint = null;
@@ -1263,23 +1348,35 @@ function popCells(idxs, level) {
   var sess = S.session;
   setTimeout(function () {
     if (!S || S.session !== sess) return; // 再スタートされていたら前のゲームの処理は捨てる
-    var posBefore = captureTilePos();
-    zeroIdxs.forEach(function (i) { S.cells[i] = 0; S.spec[i] = null; });
-    var res = settleBoardEx(S.cells, S.spec, specialOpts());
-    S.cells = res.cells;
-    S.spec = res.spec;
-    S.fresh = res.fresh;
-    render();
-    noteSpecialSpawns(res);
-    animateFall(posBefore, res.src);
-    setTimeout(function () { if (S && S.session === sess) resolveStep(level + 1); }, 360);
+    guardStep(sess, function () {
+      dropAndRefill(zeroIdxs);
+      setTimeout(function () { if (S && S.session === sess) resolveStep(level + 1); }, 360);
+      return true;
+    });
   }, 240);
+  return true;
+}
+// 消えたマスを空けて落下・補充し、表示を更新する（popCells / bigPop 共通）
+function dropAndRefill(zeroIdxs) {
+  var posBefore = captureTilePos();
+  zeroIdxs.forEach(function (i) { S.cells[i] = 0; S.spec[i] = null; });
+  var res = settleBoardEx(S.cells, S.spec, specialOpts());
+  S.cells = res.cells;
+  S.spec = res.spec;
+  S.fresh = res.fresh;
+  render();
+  noteSpecialSpawns(res);
+  animateFall(posBefore, res.src);
 }
 
 // 落下後の解決：ビッグポップ優先 → 連鎖 → 終了判定
 function resolveStep(nextLevel) {
+  var sess0 = S.session;
+  guardStep(sess0, function () { return resolveStepBody(nextLevel); });
+}
+function resolveStepBody(nextLevel) {
   var big = findBigRun(S.cells);
-  if (big.length > 0) { bigPop(big, nextLevel); return; }
+  if (big.length > 0) { bigPopBody(big, nextLevel); return true; }
   // 連鎖1段目だけ判定を広げる：落下で動いたタイルが関係するペアは、相手が止まっていたタイルでも消える
   // （例：9の隣に1が落ちてきてぶつかったら、さすがにコンボになる ― 福山の指定 2026-11-06）。
   // 2段目以降は fresh 同士に絞り、暴走を防ぐ
@@ -1296,18 +1393,23 @@ function resolveStep(nextLevel) {
       S.chainReadySet = null;
       popCells(pairs, nextLevel);
     }, 190);
-  } else {
-    S.busy = false;
-    S.lastAction = Date.now();
-    render();
-    if (S.timeUp) { gameOver("time"); return; }
-    if (S.gauge >= 100) startFever(); // 満タンなら自動発動
-    checkEnd();
+    return true;
   }
+  S.busy = false;
+  S.lastAction = Date.now();
+  render();
+  if (confirmTimeUp()) { gameOver("time"); return true; }
+  if (S.gauge >= 100) startFever(); // 満タンなら自動発動
+  checkEnd();
+  return true;
 }
 
 // ビッグポップ：同じ数字（6・7・8・9）が縦か横に4つ以上そろったら特別消去（1個20点）
 function bigPop(idxs, nextLevel) {
+  var sess0 = S.session;
+  guardStep(sess0, function () { return bigPopBody(idxs, nextLevel); });
+}
+function bigPopBody(idxs, nextLevel) {
   S.busy = true;
   S.lastAction = Date.now();
   S.hint = null;
@@ -1333,22 +1435,19 @@ function bigPop(idxs, nextLevel) {
   var sess = S.session;
   setTimeout(function () {
     if (!S || S.session !== sess) return;
-    var posBefore = captureTilePos();
-    zeroIdxs.forEach(function (i) { S.cells[i] = 0; S.spec[i] = null; });
-    var res = settleBoardEx(S.cells, S.spec, specialOpts());
-    S.cells = res.cells;
-    S.spec = res.spec;
-    S.fresh = res.fresh;
-    render();
-    noteSpecialSpawns(res);
-    animateFall(posBefore, res.src);
-    setTimeout(function () { if (S && S.session === sess) resolveStep(nextLevel); }, 360);
+    guardStep(sess, function () {
+      dropAndRefill(zeroIdxs);
+      setTimeout(function () { if (S && S.session === sess) resolveStep(nextLevel); }, 360);
+      return true;
+    });
   }, 420);
+  return true;
 }
 
 function checkEnd() {
-  if (S.timeUp) { gameOver("time"); return; }
-  if (existsTraceMove(S.cells) || findBigRun(S.cells).length > 0) return;
+  if (!S || S.over) return;
+  if (confirmTimeUp()) { gameOver("time"); return; }
+  if (existsTraceMove(S.cells, S.spec) || findBigRun(S.cells).length > 0) return;
   if (S.shuffle > 0) {
     el("msgLabel").textContent = "消せる場所がない…シャッフル券が使えます";
     return;
@@ -1361,7 +1460,7 @@ setInterval(function () {
   if (!S || S.over || S.busy || S.hint || S.timeUp || tracing) return;
   if (Date.now() - S.lastAction < 6000) return;
   if (el("gameScreen").classList.contains("hidden")) return;
-  var g = findTracePath(S.cells);
+  var g = findTracePath(S.cells, S.spec);
   if (g) { S.hint = g; render(); }
 }, 500);
 
@@ -1377,7 +1476,7 @@ el("shuffleBtn").addEventListener("click", function () {
     var vals = S.cells.slice();
     for (var i = vals.length - 1; i > 0; i--) { var j = ri(i + 1); var tmp = vals[i]; vals[i] = vals[j]; vals[j] = tmp; }
     S.cells = vals;
-    if (existsTraceMove(S.cells)) break;
+    if (existsTraceMove(S.cells, S.spec)) break;
     if (t === 59) S.cells = genBoard();
   }
   S.lastAction = Date.now();
@@ -1410,8 +1509,10 @@ el("bgmBtn").addEventListener("click", function () {
 });
 
 function gameOver(reason) {
-  if (S.over) return;
+  if (!S || S.over) return;
   S.over = true;
+  resetTraceInput(); // 時間切れの瞬間に指を置いたままでも、なぞり状態とイベント購読を残さない
+  S.hint = null;
   el("dangerOverlay").classList.remove("on");
   if (timerInt) { clearInterval(timerInt); timerInt = null; }
   bgmStop();
@@ -1422,30 +1523,55 @@ function gameOver(reason) {
   el("finalScore").textContent = S.score;
   var best = 0;
   try {
-    best = parseInt(localStorage.getItem("tenpop_best") || "0", 10);
-    if (S.score > best) { best = S.score; localStorage.setItem("tenpop_best", String(best)); }
+    best = readBest();
+    if (S.score > best || String(best) !== localStorage.getItem("tenpop_best")) {
+      // 更新時に加え、保存値が壊れていた（0扱いにした）場合もここで正しい値に書き直す
+      best = Math.max(best, S.score);
+      localStorage.setItem("tenpop_best", String(best));
+    }
   } catch (e) { best = S.score; }
   el("bestLabel").textContent = "ベストスコア：" + best + " 点（この端末のみ）";
   el("finalStats").textContent = "消したタイル " + S.popped + " 個 ／ 最大 " + S.maxChain + " 連鎖 ／ ビッグポップ " + S.bigPops + " 回";
-  rankSent = false;
   el("nameInput").value = rankName();
   el("submitStatus").textContent = "";
   el("submitScoreBtn").disabled = false;
-  // ランキング自動登録：ニックネームが保存済みなら、ボタンを押さなくても自動で登録する
+  // ランキング自動登録：ニックネームが保存済みなら、ボタンを押さなくても自動で登録する。
+  // 送るのは入力欄の途中の文字列ではなく、保存済みの確定した名前（submitScore の auto 指定）
   if (rankName() && RANKING_URL) {
     el("submitStatus").textContent = "ランキングに自動登録しています…";
-    setTimeout(function () { if (S.over && !rankSent) submitScore(); }, 700);
+    var gid = S.session;
+    setTimeout(function () {
+      if (S && S.session === gid && S.over && !S.rankSent) submitScore({ auto: true });
+    }, 700);
   }
+}
+// 端末ベスト：有限の非負数でなければ壊れているとみなして 0 として扱う（以後の更新で正しい値に書き直される）
+function readBest() {
+  var raw = null;
+  try { raw = localStorage.getItem("tenpop_best"); } catch (e) { return 0; }
+  if (raw === null || raw === "") return 0;
+  var n = Number(raw);
+  if (!isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
 }
 
 // ===== ランキング（Googleスプレッドシート＋Apps Script方式。FACTORのソロランキングと同じ仕組み）=====
 // ↓ Apps Scriptをウェブアプリとして発行したURLをここに貼ると有効になる（空の間は「準備中」表示）。
 // 設置手順は ranking-setup.md、貼るコードは ranking-apps-script.gs を参照。
 var RANKING_URL = "https://script.google.com/macros/s/AKfycbywtZgYesooyHB0f2X92M5SRWz7qVq4zvmvxYqCQ4ny_FtbgiSvGWAgZdkHphateE5G/exec";
-var rankSent = false; // このゲームのスコアを送信済みか
+// 送信済みフラグは S.rankSent（ゲーム単位）。通信コールバックは S.session で自分のゲームか照合する
+var NAME_MAX = 10;        // ニックネームの最大文字数（入力欄 maxlength・サーバー側と揃える）
+var SCORE_MAX = 100000;   // スコアの妥当範囲の上限（サーバー側と揃える）
+var rankCbSeq = 0;        // JSONP コールバック名の連番
+var rankViewSeq = 0;      // ランキング画面の読み込み世代（古い応答で新しい表示を上書きしない）
 
+// 名前の正規化：前後の空白を除き、文字数（サロゲートペアは1文字）で NAME_MAX に切り詰める
+function normalizeName(n) {
+  var chars = Array.from(String(n == null ? "" : n).replace(/[\u0000-\u001f\u007f]/g, "").trim());
+  return chars.slice(0, NAME_MAX).join("");
+}
 function rankName() {
-  try { return localStorage.getItem("tenpop_name") || ""; } catch (e) { return ""; }
+  try { return normalizeName(localStorage.getItem("tenpop_name") || ""); } catch (e) { return ""; }
 }
 function saveRankName(n) {
   try { localStorage.setItem("tenpop_name", n); } catch (e) { /* ignore */ }
@@ -1455,19 +1581,48 @@ function escapeHtml(s) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
   });
 }
+function isValidScore(v) {
+  return typeof v === "number" && isFinite(v) && v >= 0 && Math.floor(v) === v && v <= SCORE_MAX;
+}
+// 応答の検証：{ rows: [...] } で rows が配列であること。各行は name が空でない文字列、score が有限の非負整数。
+// 不正な行は捨てる。形がそもそも違えば null（＝読み込み失敗扱い）
+function validateRankData(data) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.rows)) return null;
+  var rows = [];
+  data.rows.forEach(function (r) {
+    if (!r || typeof r !== "object") return;
+    if (typeof r.name !== "string") return;
+    var name = normalizeName(r.name);
+    if (!name) return;
+    var score = typeof r.score === "string" && /^\d+$/.test(r.score) ? Number(r.score) : r.score;
+    if (!isValidScore(score)) return;
+    var chain = Number(r.chain);
+    rows.push({ name: name, score: score, chain: isFinite(chain) && chain >= 0 ? Math.floor(chain) : 0 });
+  });
+  return { rows: rows };
+}
 // 読み取りはJSONP（Apps ScriptはCORSヘッダを返さないため、fetchでは読めない）
 function rankFetch(cb) {
   if (!RANKING_URL) { cb(null, "notready"); return; }
-  var cbName = "tenpopRankCb_" + Date.now();
+  // 時刻だけだと同じミリ秒の呼び出しで衝突するので、連番と乱数を混ぜる
+  var cbName = "tenpopRankCb_" + Date.now() + "_" + (++rankCbSeq) + "_" + Math.floor(Math.random() * 1e9);
   var sc = document.createElement("script");
   var done = false;
-  function cleanup() {
-    try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+  function finish(data, err) {
+    if (done) return;
+    done = true;
+    // 遅れて届いた応答がエラーにならないよう、関数は空にしてしばらく残してから消す
+    window[cbName] = function () {};
+    setTimeout(function () { try { delete window[cbName]; } catch (e) { window[cbName] = undefined; } }, 60000);
     if (sc.parentNode) sc.parentNode.removeChild(sc);
+    cb(data, err);
   }
-  window[cbName] = function (data) { done = true; cleanup(); cb(data, null); };
-  sc.onerror = function () { if (!done) { cleanup(); cb(null, "error"); } };
-  setTimeout(function () { if (!done) { cleanup(); cb(null, "timeout"); } }, 9000);
+  window[cbName] = function (data) {
+    var v = validateRankData(data);
+    if (v) finish(v, null); else finish(null, "invalid");
+  };
+  sc.onerror = function () { finish(null, "error"); };
+  setTimeout(function () { finish(null, "timeout"); }, 9000);
   sc.src = RANKING_URL + (RANKING_URL.indexOf("?") >= 0 ? "&" : "?") + "callback=" + cbName;
   document.body.appendChild(sc);
 }
@@ -1475,11 +1630,26 @@ function rankFetch(cb) {
 function dedupeRows(rows) {
   var best = {}, order = [];
   (rows || []).forEach(function (r) {
-    if (!(r.name in best)) { order.push(r.name); best[r.name] = r; }
+    if (!Object.prototype.hasOwnProperty.call(best, r.name)) { order.push(r.name); best[r.name] = r; }
     else if (r.score > best[r.name].score) { best[r.name] = r; }
   });
   return order.map(function (n) { return best[n]; })
     .sort(function (a, b) { return b.score - a.score; });
+}
+// 取得した一覧から自分（name）の記録を特定して順位メッセージを作る。
+// 一覧は名前ごとの自己ベストにまとめてあるので、今回のスコアが自己ベストでない場合も正しく扱う。
+// 順位は「自分より高いスコアの人数＋1」（同点は同順位）
+function rankMessage(rows, name, score) {
+  rows = dedupeRows(rows);
+  var own = null;
+  for (var i = 0; i < rows.length; i++) { if (rows[i].name === name) { own = rows[i]; break; } }
+  if (!own || own.score < score) {
+    return "送信しました（反映に少し時間がかかることがあります）";
+  }
+  var rank = 1;
+  rows.forEach(function (r) { if (r.score > own.score) rank++; });
+  if (own.score === score) return "🏆 登録できた！ 現在 " + rank + " 位";
+  return "🏆 登録できた！ 自己ベスト " + own.score + " 点で現在 " + rank + " 位";
 }
 function renderRankList(data) {
   var box = el("rankList");
@@ -1498,6 +1668,7 @@ function renderRankList(data) {
   box.innerHTML = html;
 }
 function openRanking() {
+  var view = ++rankViewSeq;
   el("rankOverlay").classList.remove("hidden");
   el("rankNote").textContent = "";
   if (!RANKING_URL) {
@@ -1506,6 +1677,7 @@ function openRanking() {
   }
   el("rankList").innerHTML = "<p style='text-align:center;'>読み込み中…</p>";
   rankFetch(function (data, err) {
+    if (view !== rankViewSeq) return; // 開き直した後に届いた古い応答は捨てる
     if (err) {
       el("rankList").innerHTML = "<p style='text-align:center; line-height:1.8;'>読み込めませんでした。<br>通信環境を確認してもう一度開いてね。</p>";
       return;
@@ -1514,47 +1686,47 @@ function openRanking() {
     el("rankNote").textContent = "上位30件を表示しています";
   });
 }
-function submitScore() {
+// スコア送信。opts.auto のときは保存済みの確定した名前で送る（入力途中の文字列は使わない）
+function submitScore(opts) {
+  if (!S || !S.over) return;
+  var auto = !!(opts && opts.auto);
   var st = el("submitStatus");
-  if (rankSent) { st.textContent = "このスコアは登録済みです"; return; }
-  var name = (el("nameInput").value || "").trim();
+  if (S.rankSent) { st.textContent = "このスコアは登録済みです"; return; }
+  var name = auto ? rankName() : normalizeName(el("nameInput").value);
   if (!name) {
     st.textContent = "ニックネームを入れてね";
-    try { el("nameInput").focus(); } catch (e) { /* ignore */ }
+    if (!auto) { try { el("nameInput").focus(); } catch (e) { /* ignore */ } }
     return;
   }
-  saveRankName(name);
+  if (!auto) { saveRankName(name); el("nameInput").value = name; }
   if (!RANKING_URL) {
     st.textContent = "ランキングは準備中です（サーバー未接続）。スコアはこの端末に保存されています";
     return;
   }
+  // 送信を開始した時点で送信済みにする（二重送信の防止）。以後このゲームでは再送しない
+  S.rankSent = true;
+  var gid = S.session, score = S.score, chain = S.maxChain;
   st.textContent = "登録中…";
   el("submitScoreBtn").disabled = true;
   var url = RANKING_URL + (RANKING_URL.indexOf("?") >= 0 ? "&" : "?") +
     "action=submit&name=" + encodeURIComponent(name) +
-    "&score=" + S.score + "&chain=" + S.maxChain + "&t=" + Date.now();
-  try { fetch(url, { mode: "no-cors" }).catch(function () { /* 結果は再読込で確認する */ }); }
-  catch (e) { /* ignore */ }
+    "&score=" + score + "&chain=" + chain + "&t=" + Date.now();
+  try {
+    var p = fetch(url, { mode: "no-cors" });
+    if (p && p.catch) p.catch(function () { /* 結果は再読込で確認する */ });
+  } catch (e) { /* ignore */ }
   setTimeout(function () {
+    if (!S || S.session !== gid) return; // 次のゲームが始まっていたら何もしない
     rankFetch(function (data, err) {
-      el("submitScoreBtn").disabled = false;
-      rankSent = true;
-      if (!err && data && data.rows) {
-        var rows = dedupeRows(data.rows);
-        var idx = -1;
-        for (var i = 0; i < rows.length; i++) {
-          if (rows[i].name === name && rows[i].score === S.score) { idx = i; break; }
-        }
-        st.textContent = idx >= 0
-          ? "🏆 登録できた！ 現在 " + (idx + 1) + " 位"
-          : "🏆 登録できた！（30位圏外でした）";
-      } else {
-        st.textContent = "送信しました（反映に少し時間がかかることがあります）";
-      }
+      if (!S || S.session !== gid) return; // 前のゲームの応答で新しいゲームの表示を書き換えない
+      // 送信済みなのでボタンは押せないまま（押しても「登録済み」と出るだけ）
+      st.textContent = (!err && data) ? rankMessage(data.rows, name, score)
+        : "送信しました（反映に少し時間がかかることがあります）";
     });
   }, 1600);
 }
 function backToTitle() {
+  resetTraceInput();
   if (timerInt) { clearInterval(timerInt); timerInt = null; }
   bgmStop();
   el("dangerOverlay").classList.remove("on");
@@ -1565,7 +1737,7 @@ function backToTitle() {
   el("startScreen").classList.remove("hidden");
 }
 el("titleBtn").addEventListener("click", backToTitle);
-el("submitScoreBtn").addEventListener("click", submitScore);
+el("submitScoreBtn").addEventListener("click", function () { submitScore(); });
 el("rankBtnTitle").addEventListener("click", openRanking);
 el("rankBtnFinal").addEventListener("click", openRanking);
 el("rankClose").addEventListener("click", function () { el("rankOverlay").classList.add("hidden"); });
