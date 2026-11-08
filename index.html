@@ -188,6 +188,18 @@
     transform: scale(1.13); box-shadow: 0 0 0 3px #fff2b0, 0 6px 14px rgba(0,0,0,.3);
     z-index: 4; text-shadow: none;
   }
+  /* v1.3 なぞりの合計を色で示す：#board の --sumHue（= 200 − 16 × 合計）を発光色に使う。
+     合計1で水色、5で緑、9で金色の方向へ。--sumHue が無いとき（なぞっていないとき）は従来の見た目 */
+  #board.tracing .tile.traced {
+    box-shadow: 0 0 0 3px hsl(var(--sumHue), 95%, 82%), 0 0 16px 6px hsla(var(--sumHue), 95%, 55%, .95), 0 6px 14px rgba(0,0,0,.3);
+  }
+  /* 合計10に到達した瞬間：白く光りながら、既存の消去アニメーション（popA）で消える */
+  .tile.pop.sum10 {
+    animation: popA .22s ease forwards, sum10Flash .22s ease forwards;
+    box-shadow: 0 0 0 4px #fff, 0 0 24px 12px rgba(255,255,255,.95);
+    z-index: 4;
+  }
+  @keyframes sum10Flash { 0% { filter: brightness(2.2) saturate(.2); } 100% { filter: brightness(1.2); } }
   .tile.dragging {
     z-index: 5; transition: none;
     box-shadow: 0 10px 22px rgba(0,0,0,.4), 0 0 0 3px #fff;
@@ -1007,6 +1019,7 @@ function render() {
     ? (S.traceWild && S.trace.length === 1 ? "🌈 ワイルド：次のタイルと組で10になる" : "あと " + (10 - S.traceSum) + "！（合計 " + S.traceSum + "）")
     : "タイルをなぞって合計10を作ろう";
   var board = el("board");
+  applyTraceSumColor(board);
   board.innerHTML = "";
   S.cells.forEach(function (v, i) {
     var d = document.createElement("div");
@@ -1165,6 +1178,26 @@ function resetTraceInput() {
   tracing = false;
   _traceListen(false);
   if (S) { S.trace = []; S.traceSum = 0; S.traceWild = false; }
+  clearTraceSumColor(); // gameOver／newGame では render を通らないことがあるので、色の状態もここで消す
+}
+// v1.3 なぞりの合計を色で示す：#board の CSS 変数 --sumHue に 200 − 16 × 合計 を入れる。
+// render のたびに呼ぶので、タイルを足したとき・1つ戻したときに色が追随し、なぞりが終われば消える
+function traceSumHue(sum) { return 200 - 16 * sum; }
+function applyTraceSumColor(board) {
+  if (!board) return;
+  if (S && S.trace && S.trace.length) {
+    board.style.setProperty("--sumHue", String(traceSumHue(S.traceSum)));
+    board.classList.add("tracing");
+  } else {
+    board.style.removeProperty("--sumHue");
+    board.classList.remove("tracing");
+  }
+}
+function clearTraceSumColor() {
+  var board = el("board");
+  if (!board) return;
+  board.style.removeProperty("--sumHue");
+  board.classList.remove("tracing");
 }
 function traceRelease() {
   if (!tracing) return;
@@ -1174,12 +1207,15 @@ function traceRelease() {
 }
 function tracePop() {
   var idxs = S.trace.slice();
+  var hit10 = S.traceSum === 10 && !S.traceWild; // ワイルド手（合計に関係なく消える）は対象外
   tracing = false;
   _traceListen(false);
   S.trace = [];
   S.traceSum = 0;
   S.traceWild = false;
   popCells(idxs, 1);
+  // 合計10に到達した瞬間：消えるタイルを白く光らせる（popCells の render 後のタイルに付ける。色の変数は render で消えている）
+  if (hit10) idxs.forEach(function (i) { var t = el("tile" + i); if (t) t.classList.add("sum10"); });
 }
 function tracePointerMove(x, y) {
   if (!tracing) return;
