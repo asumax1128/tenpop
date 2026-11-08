@@ -92,11 +92,13 @@
     transition: width .25s linear;
   }
   #timeBarFill.low { background: linear-gradient(90deg, #ffb52e, #ff5a5a); }
-  .soundRow { display: flex; gap: 8px; justify-content: flex-end; margin-bottom: 8px; }
+  .soundRow { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-bottom: 8px; }
   .soundBtn {
     background: rgba(255,255,255,.85); color: #7c4dff; padding: 6px 14px; font-size: 14px;
     border-radius: 999px; box-shadow: 0 3px 8px rgba(120,70,180,.18); border: 2px solid #fff;
+    white-space: nowrap; /* v1.4 ボタンが3つになったので、文字はボタン内で折り返さず、入りきらなければボタンごと次の行へ */
   }
+  @media (max-width: 380px) { .soundBtn { padding: 6px 10px; font-size: 13px; } }
   .msg {
     min-height: 36px; display: flex; align-items: center; justify-content: center;
     text-align: center; font-weight: 800; font-size: 19px; color: #e05a1f; margin: 2px 0 10px;
@@ -461,6 +463,7 @@
     <div id="timeBarOuter"><div id="timeBarFill"></div></div>
     <div class="soundRow">
       <button class="soundBtn" id="bgmBtn">🎵 BGM</button>
+      <button class="soundBtn" id="traceSoundBtn">🎹 なぞり音</button>
       <button class="soundBtn" id="soundBtn">🔊 音あり</button>
     </div>
     <div class="card" style="padding:14px;">
@@ -801,7 +804,7 @@ var bgmOn = true;
 try { bgmOn = localStorage.getItem("tenpop_bgm") !== "off"; } catch (e) { bgmOn = true; }
 var bgmTimer = null, bgmNext = 0, bgmStep = 0;
 function midiHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
-function toneAt(freq, t, dur, type, vol) {
+function toneAt(freq, t, dur, type, vol, dest) {
   var ctx = ac(); if (!ctx) return;
   try {
     var o = ctx.createOscillator(), g = ctx.createGain();
@@ -810,9 +813,28 @@ function toneAt(freq, t, dur, type, vol) {
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(ctx.destination);
+    o.connect(g); g.connect(dest || ctx.destination);
     o.start(t); o.stop(t + dur + 0.05);
   } catch (e) { /* ignore */ }
+}
+// v1.4 BGM の音量バス：なぞっている間だけ約3割下げる（ダッキング）
+var BGM_DUCK_LEVEL = 0.7;
+var bgmGainNode = null, bgmDuckLevel = 1;
+function bgmBus(ctx) {
+  try {
+    if (!bgmGainNode || bgmGainNode.context !== ctx) {
+      bgmGainNode = ctx.createGain();
+      bgmGainNode.gain.value = bgmDuckLevel;
+      bgmGainNode.connect(ctx.destination);
+    }
+    return bgmGainNode;
+  } catch (e) { return ctx.destination; }
+}
+function setBgmDuck(on) {
+  bgmDuckLevel = on ? BGM_DUCK_LEVEL : 1;
+  if (!bgmGainNode || !audioCtx) return;
+  try { bgmGainNode.gain.setTargetAtTime(bgmDuckLevel, audioCtx.currentTime, 0.03); }
+  catch (e) { try { bgmGainNode.gain.value = bgmDuckLevel; } catch (e2) { /* ignore */ } }
 }
 // コード進行 C → Am → F → G、各コード8ステップ（8分音符 @BPM116）
 var BGM_CHORDS = [
@@ -835,9 +857,11 @@ function bgmPlayStep(step, t) {
   var len = bgmStepLen();
   var chord = BGM_CHORDS[Math.floor(step / 8) % 4];
   var s = step % 8;
-  toneAt(midiHz(chord.arp[BGM_ARP_PATTERN[s]]), t, len * 1.7, "triangle", 0.032);
-  if (s === 0 || s === 4) toneAt(midiHz(chord.bass), t, len * 3.2, "sine", 0.05);
-  if (s === 6) toneAt(midiHz(chord.arp[3] + 12), t, len * 1.1, "sine", 0.014);
+  var ctx = ac(); if (!ctx) return;
+  var bus = bgmBus(ctx);
+  toneAt(midiHz(chord.arp[BGM_ARP_PATTERN[s]]), t, len * 1.7, "triangle", 0.032, bus);
+  if (s === 0 || s === 4) toneAt(midiHz(chord.bass), t, len * 3.2, "sine", 0.05, bus);
+  if (s === 6) toneAt(midiHz(chord.arp[3] + 12), t, len * 1.1, "sine", 0.014, bus);
 }
 function bgmStart() {
   if (!bgmOn || bgmTimer) return;
@@ -857,23 +881,38 @@ function bgmStop() {
   if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = null; }
 }
 function sfxSelect() { tone(660, 0.05, "triangle", 0.045); }
-function sfxPop(level) {
-  var m = Math.pow(1.13, Math.min(level - 1, 6));
-  tone(540 * m, 0.09, "triangle", 0.14);
-  tone(810 * m, 0.13, "sine", 0.12, 0.045);
-  if (level >= 2) { // 2連鎖からキラキラ音
-    tone(1080 * m, 0.1, "sine", 0.06, 0.02);
-    tone(1350 * m, 0.12, "sine", 0.05, 0.07);
+// ===== v1.4 なぞり音（10平均律）・消去の和音・振動 =====
+// 合計 s の音：523.25 × 2^(s/10) Hz。合計10でちょうど1オクターブ上（1046.5Hz）に着地する
+var TRACE_BASE_HZ = 523.25;
+var traceSoundOn = true;
+try { traceSoundOn = localStorage.getItem("tenpop_trace_sound") !== "off"; } catch (e) { traceSoundOn = true; }
+function traceHz(sum) { return TRACE_BASE_HZ * Math.pow(2, sum / 10); }
+// なぞり1マスごとの音（sfxSelect の置き換え）。quiet = 1つ戻したとき（小さめ）
+function sfxTraceSum(sum, quiet) {
+  if (!traceSoundOn) return;
+  tone(traceHz(sum), 0.08, "sine", quiet ? 0.035 : 0.075);
+}
+// 消去の和音の根音：連鎖の段ごとに10平均律で2段ずつ上げる（1段目 523.25Hz、5連鎖以上で 911.0Hz が上限）
+function popChordRoot(level) {
+  var steps = 2 * Math.min(Math.max(level, 1) - 1, 4);
+  return TRACE_BASE_HZ * Math.pow(2, steps / 10);
+}
+var POP_CHORD_RATIOS = [1, 5 / 4, 3 / 2, 2]; // 根音・長3度・完全5度・オクターブ（純正律）
+// 消去の音：和音。arpSums があれば（5枚以上のパス）、先になぞり音の音階を駆け上がるアルペジオを鳴らす
+function sfxPop(level, arpSums) {
+  var delay = 0;
+  if (arpSums && arpSums.length && traceSoundOn) {
+    arpSums.forEach(function (sum, k) { tone(traceHz(sum), 0.06, "sine", 0.06, k * 0.035); });
+    delay = arpSums.length * 0.035;
   }
-  if (level >= 3) { // 3連鎖で和音の厚み
-    tone(1620 * m, 0.16, "sine", 0.05, 0.12);
-    tone(675 * m, 0.12, "triangle", 0.05, 0.03);
-    tone(945 * m, 0.12, "triangle", 0.04, 0.05);
-  }
-  if (level >= 4) { // 4連鎖以上はコードスタッブ＋上昇アルペジオで大盤振る舞い
-    [0, 4, 7].forEach(function (st) { tone(540 * m * Math.pow(2, st / 12), 0.2, "triangle", 0.05, 0.16); });
-    [0, 4, 7, 12].forEach(function (st, i) { tone(810 * m * Math.pow(2, st / 12), 0.13, "sine", 0.05, 0.2 + i * 0.05); });
-  }
+  var root = popChordRoot(level);
+  POP_CHORD_RATIOS.forEach(function (r) { tone(root * r, 0.16, "sine", 0.07, delay); });
+}
+// 振動：navigator.vibrate がある端末だけ
+function vibrate(pattern) {
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(pattern);
+  } catch (e) { /* 振動できなくても続行 */ }
 }
 function sfxFever() { // フィーバーのジングル（上昇アルペジオ＋低音の支え）
   [60, 64, 67, 72, 76, 79, 84].forEach(function (n, i) { tone(midiHz(n), 0.16, "triangle", 0.09, i * 0.055); });
@@ -925,6 +964,7 @@ function newGame() {
   el("submitStatus").textContent = ""; // 前のゲームの送信表示を持ち越さない
   el("submitScoreBtn").disabled = false;
   updateSoundBtn();
+  updateTraceSoundBtn();
   updateBgmBtn();
   bgmStart();
   render();
@@ -1111,6 +1151,7 @@ var tracing = false;
 function _traceMoveHandler(e) { tracePointerMove(e.clientX, e.clientY); }
 function _traceEndHandler() { traceRelease(); }
 function _traceListen(on) {
+  setBgmDuck(on); // なぞっている間だけ BGM を約3割下げる（離す・消える・終了で戻る）
   if (on) {
     document.addEventListener("pointermove", _traceMoveHandler);
     document.addEventListener("pointerup", _traceEndHandler);
@@ -1132,6 +1173,8 @@ function traceStart(i) {
   S.traceWild = !!(S.spec && S.spec[i] === "wild");
   S.traceSum = S.traceWild ? 0 : S.cells[i];
   _traceListen(true);
+  sfxTraceSum(S.traceSum, false);
+  vibrate(6);
   render();
 }
 function traceAdd(j) {
@@ -1145,6 +1188,7 @@ function traceAdd(j) {
     path.pop();
     if (S.spec && S.spec[removed] === "wild") S.traceWild = false;
     else if (!S.traceWild) S.traceSum -= S.cells[removed];
+    sfxTraceSum(S.traceSum, true); // 戻った後の合計の音を小さめに
     render();
     return;
   }
@@ -1168,8 +1212,9 @@ function traceAdd(j) {
   path.push(j);
   S.traceSum += S.cells[j];
   S.lastAction = Date.now();
-  if (S.traceSum === 10) { tracePop(); return; }
-  sfxSelect();
+  vibrate(6);
+  if (S.traceSum === 10) { tracePop(); return; } // 合計10は消去の和音で鳴らす
+  sfxTraceSum(S.traceSum, false);
   render();
 }
 // なぞり途中の入力状態を必ず解除する（gameOver／newGame／タイトル戻り）。
@@ -1374,7 +1419,13 @@ function popCellsBody(idxs, level) {
     if (level >= 2 && S.fresh && S.fresh.indexOf(i) >= 0) t.classList.add("cause");
   });
   ex.cracked.forEach(function (i) { var t = el("tile" + i); if (t) t.classList.add("pop"); });
-  sfxPop(level);
+  var arpSums = null;
+  if (level === 1 && idxs.length >= 5) { // なぞった順の合計（なぞり中に鳴った音）を速く駆け上がる
+    arpSums = []; var run = 0;
+    idxs.forEach(function (i) { if (!(S.spec && S.spec[i] === "wild")) { run += S.cells[i]; arpSums.push(run); } });
+  }
+  sfxPop(level, arpSums);
+  vibrate([12, 30, 12]);
   if (level >= 2) {
     showBanner(level + " 連鎖！", level, false);
     var f = el("flash"); // 連鎖の閃光
@@ -1555,6 +1606,15 @@ el("soundBtn").addEventListener("click", function () {
   else bgmStop();
 });
 
+function updateTraceSoundBtn() {
+  el("traceSoundBtn").textContent = traceSoundOn ? "🎹 なぞり音あり" : "🎹 なぞり音なし";
+}
+el("traceSoundBtn").addEventListener("click", function () {
+  traceSoundOn = !traceSoundOn;
+  try { localStorage.setItem("tenpop_trace_sound", traceSoundOn ? "on" : "off"); } catch (e) {}
+  updateTraceSoundBtn();
+  if (traceSoundOn) sfxTraceSum(10, true);
+});
 function updateBgmBtn() {
   el("bgmBtn").textContent = bgmOn ? "🎵 BGMあり" : "🎵 BGMなし";
 }
