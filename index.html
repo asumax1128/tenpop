@@ -201,6 +201,9 @@
     box-shadow: 0 0 0 4px #fff, 0 0 24px 12px rgba(255,255,255,.95);
     z-index: 4;
   }
+  .tile.pop.sum10.tetra, .tile.pop.tetra { /* 控えめな金色の縁（白い光の上に重ねる） */
+    box-shadow: 0 0 0 3px #ffe8a3, 0 0 16px 7px rgba(255, 196, 60, .8);
+  }
   @keyframes sum10Flash { 0% { filter: brightness(2.2) saturate(.2); } 100% { filter: brightness(1.2); } }
   .tile.dragging {
     z-index: 5; transition: none;
@@ -1468,6 +1471,15 @@ function recoverBusy(sess) {
   } catch (e2) { /* 表示や終了判定の失敗で固まらないように握りつぶす（busy は解除済み） */ }
 }
 
+// 値の並びとマスの種類だけで判定する（ちょうど4枚・1,2,3,4 か 4,3,2,1 の順・4枚とも通常マス）
+var TETRA_BONUS = 10;
+function isTetractys(vals, specs) {
+  if (!vals || vals.length !== 4) return false;
+  if (specs && specs.some(function (x) { return !!x; })) return false;
+  var v = vals.join(",");
+  return v === "1,2,3,4" || v === "4,3,2,1";
+}
+
 function popCells(idxs, level) {
   var sess0 = S.session;
   guardStep(sess0, function () { return popCellsBody(idxs, level); });
@@ -1489,6 +1501,11 @@ function popCellsBody(idxs, level) {
     S.buzzerPop = false;
     if (sp.timeTiles === 0) { pts = Math.floor(pts * BUZZER_MULT); buzzerHit = true; }
   }
+  // 隠し要素：プレイヤー自身のなぞり（level 1）で、ちょうど4枚の 1,2,3,4／4,3,2,1 の順。+10 は通常の得点として加算（倍率の外）
+  var tetra = level === 1 && isTetractys(
+    idxs.map(function (i) { return S.cells[i]; }),
+    idxs.map(function (i) { return S.spec ? S.spec[i] : null; }));
+  if (tetra) pts += TETRA_BONUS;
   // フィーバーゲージ：消した個数で溜まる（連鎖は後押し）。満タンで止まり、フィーバー中は溜まらない
   S.gauge = Math.min(100, S.gauge + idxs.length + Math.floor(ex.extra.length / 2) + (level >= 2 ? 3 : 0));
   S.score += pts;
@@ -1501,6 +1518,7 @@ function popCellsBody(idxs, level) {
     // 連鎖では「落下で動いてきたタイル」を金色に光らせ、なぜ連鎖したかを見えるようにする
     if (level >= 2 && S.fresh && S.fresh.indexOf(i) >= 0) t.classList.add("cause");
   });
+  if (tetra) idxs.forEach(function (i) { var t = el("tile" + i); if (t) t.classList.add("tetra"); });
   ex.cracked.forEach(function (i) { var t = el("tile" + i); if (t) t.classList.add("pop"); });
   var arpSums = null;
   if (level === 1 && idxs.length >= 5) { // なぞった順の合計（なぞり中に鳴った音）を速く駆け上がる
@@ -1536,7 +1554,7 @@ function popCellsBody(idxs, level) {
   if (ex.cracked.length > 0) note += " 氷が割れた!";
   if (longBonus >= 40) showBanner("LONG×" + idxs.length + "!", 3, false);
   spawnPopup(idxs, (level >= 2 ? level + "連鎖！ " : "") + "+" + pts + note, level >= 2, level >= 3);
-  el("msgLabel").textContent = (level >= 2 ? level + " 連鎖！ +" + pts : "+" + pts) + note;
+  el("msgLabel").textContent = (level >= 2 ? level + " 連鎖！ +" + pts : "+" + pts) + note + (tetra ? " ✦ テトラクティス +" + TETRA_BONUS : "");
   var zeroIdxs = ex.all.concat(ex.cracked);
   var sess = S.session;
   setTimeout(function () {
