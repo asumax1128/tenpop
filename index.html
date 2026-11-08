@@ -413,6 +413,7 @@
         <span class="tutStep">STEP 5 / 5</span>
         <p><b>🔥フィーバーは自動発動！</b> 消すたびに下のゲージが溜まって、満タンになると大きい数がひっくり返る（<b>6→4、7→3、8→2、9→1</b>）。盤面が一気に組みやすくなるよ。</p>
         <p><b>残り15秒はラストスパート！</b> 特殊マスが出やすくなる。時間切れか、もう消せなくなったら終了。めざせハイスコア！</p>
+        <p>補充のあとも、消せる手が必ず1つは残るようにしているよ</p>
         <div class="demo roomy">
           <div class="mt v9">9</div><div class="mt arrow">→</div><div class="mt v1">1</div>
           <div class="demoSpacer"></div>
@@ -593,7 +594,28 @@ function settleBoardEx(cells, spec, opts) {
       }
     }
   }
+  ensureMoveAfterRefill(out, outSpec, src);
   return { cells: out, spec: outSpec, fresh: fresh, src: src };
+}
+// 消せる手の保証（v1.2）：補充のあと盤面に消せる手がなければ、この補充で新しく作ったマス（src が -1、氷を除く）の
+// 値だけを randomTile() で振り直す（最大 REFILL_GUARANTEE_TRIES 回）。
+// ・特殊マスの種類（spec）は変えない → ワイルド最大1・氷最大2の上限はそのまま
+// ・落ちてきた既存タイルの値は変えない → プレイヤーが見ていた数字は変わらない
+// ・振り直しても手が作れなければ、そのまま返す（詰みの受け皿は別途）
+// 補充はすべて settleBoardEx を通るので、連鎖の途中の補充でも毎回この保証が走る
+var REFILL_GUARANTEE_TRIES = 20;
+function ensureMoveAfterRefill(cells, spec, src) {
+  var newIdx = [];
+  for (var i = 0; i < BN; i++) {
+    if (src[i] === -1 && !(spec && spec[i] === "ice")) newIdx.push(i);
+  }
+  if (!newIdx.length) return 0;
+  var tries = 0;
+  while (tries < REFILL_GUARANTEE_TRIES && !existsTraceMove(cells, spec)) {
+    for (var k = 0; k < newIdx.length; k++) cells[newIdx[k]] = randomTile();
+    tries++;
+  }
+  return tries;
 }
 function findPairCellsWithin(cells, idxArray) {
   var inSet = {};
